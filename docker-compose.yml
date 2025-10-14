@@ -1,0 +1,11 @@
+services:
+  file-server:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./public:/app/public
+    restart: unless-stopped
+    container_name: http-server
+    environment:
+      - PYTHONUNBUFFERED=1
