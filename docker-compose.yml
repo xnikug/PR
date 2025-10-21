@@ -5,6 +5,8 @@ services:
       - "8080:8080"
     volumes:
       - ./public:/app/public
+      - ./client_saves:/app/client_saves
+      - ./server.conf:/app/server.conf:ro
     restart: unless-stopped
     container_name: http-server
     environment:

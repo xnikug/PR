@@ -1,571 +1,328 @@
-# Lab 1: HTTP File Server with TCP Sockets
+# Lab 2: Multithreaded HTTP File Server with Concurrency Control
 
 ## Project Overview
 
-This project implements a simple HTTP file server using Python and TCP sockets. The server can serve files, generate directory listings, and handle various MIME types. An HTTP client is also provided to download files from the server.
+This laboratory work extends the HTTP file server from Laboratory 1 by implementing three features: Multithreaded Request Handling, Request Counter with Thread Safety, and Rate Limiting by Client IP for preventing request spam using thread-safe rate limiting
 
 ---
 
-## Source Directory Contents
+## Lab Requirements Summary
+
+### Task 1: Multithreaded Server (Required)
+Implement a multithreaded server to handle concurrent requests, including a simulated delay of second. Create a test script to issue multiple simultaneous requests and compare the performance against a single-threaded version. Track the number of requests per file and display the counts in the directory listing, demonstrating a race condition with an unsafe implementation and then fixing it using locks (mutex) to show a clear before-and-after comparison. Implement rate limiting of approximately five requests per second per IP using thread-safe synchronization, and test the server with both spam requests and controlled requests, comparing throughput in each scenario.
+
+---
+
+## Project Structure
 
 ```
 /home/user1/pr_labs/lab1/
-├── server.py              # HTTP server implementation
-├── client.py              # HTTP client implementation  
-├── Dockerfile             # Docker image configuration
-├── docker-compose.yml     # Docker Compose configuration
-├── README.md              # This file
-├── client_saves/          # Directory where client saves downloaded files
-│   ├── sample.pdf
-│   ├── sample.txt
-│   └── utm_logo.png
-└── public/                # Directory served by the HTTP server
-    ├── index.html
-    ├── test-image.png
-    ├── test.txt
-    ├── utm_logo.png
-    ├── empty_folder/
-    └── folder/
-        ├── sample.txt
-        └── subfolder/
-            ├── nested.txt
-            └── sample.pdf
+├── server.py                    # Original multithreaded server
+├── server.conf                  # Server configuration file
+├── docker-entrypoint.conf       # Entrypoint wrapper for parsing config vars
+├── server_race_condition.py     # Unsafe server (demonstrates race condition)
+├── client.py                    # HTTP client implementation
+├── test_concurrent.py           # Concurrent request testing script
+├── test_rate_limit.py           # Rate limiting testing script
+├── Dockerfile                   # Docker configuration
+├── docker-compose.yml           # Docker Compose configuration
+├── README.md                    # Lab 1 documentation
+├── README_LAB2.md              # This file - Lab 2 documentation
+└── src/                         # Clean architecture modules
+    ├── http/                    # HTTP protocol layer
+    ├── services/                # Business logic (counter, rate limiter)
+    ├── handlers/                # Request handling
+    └── utils/                   # Utilities
 ```
 
 ---
 
-## Docker Configuration
+## Part 1: Multithreaded Server Implementation
 
-### Dockerfile
-```dockerfile
-FROM python:3.10-slim
+### How It Works
 
-WORKDIR /app
+The implementation creates a thread pool that manages worker threads automatically, with each incoming request submitted to the pool for concurrent processing. When a client connects to the server, the main thread accepts the connection and immediately submits the request handling to a worker thread from the pool, allowing the main thread to continue accepting new connections without blocking.
 
-COPY server.py /app/
-COPY public/ /app/public/
+The advantage of this approach is that multiple requests can be processed simultaneously. For example, if each request takes one second to process, a single-threaded server would take ten seconds to handle ten requests sequentially. In contrast, the multithreaded server can process all ten requests concurrently, completing them in approximately one second total. This concurrent processing improves performance dramatically and provides better resource utilization and responsiveness.
 
-EXPOSE 8080
+### Starting the Server
 
-CMD ["python3", "server.py", "/app/public", "8080"]
+```bash
+# Multithreaded mode (default)
+python3 server.py ./public 8080
+
+# With 1-second delay to demonstrate concurrency
+python3 server.py ./public 8080 --delay
+
+# Single-threaded mode for comparison
+python3 server.py ./public 8080 --single-threaded
 ```
 
-### docker-compose.yml
-```yaml
-services:
-  file-server:
-    build: .
-    ports:
-      - "8080:8080"
-    volumes:
-      - ./public:/app/public
-    restart: unless-stopped
-    container_name: http-server
-    environment:
-      - PYTHONUNBUFFERED=1
+### Testing Concurrent Performance
+
+Run the concurrent test script:
+
+```bash
+# Test with 10 concurrent requests
+python3 test_concurrent.py localhost 8080 10 /test.txt
 ```
+
+**Expected Output (Multithreaded with delay):**
+```
+======================================================================
+CONCURRENT REQUEST TEST
+======================================================================
+Target: localhost:8080/test.txt
+Number of requests: 10
+Concurrent workers: 10
+======================================================================
+
+Request #1 - Status: 200 - Duration: 1.023s
+Request #2 - Status: 200 - Duration: 1.025s
+...
+Request #10 - Status: 200 - Duration: 1.041s
+
+======================================================================
+RESULTS
+======================================================================
+Total execution time: 1.045s
+Throughput: 9.60 requests/second
+======================================================================
+```
+
+**Expected Output (Single-threaded with delay):**
+```
+======================================================================
+RESULTS
+======================================================================
+Total execution time: 10.245s
+Throughput: 0.98 requests/second
+======================================================================
+```
+
+### Performance Comparison
+
+| Mode | 10 Requests | Total Time | Throughput | Speedup |
+|------|------------|------------|------------|---------|
+| **Multithreaded** | Concurrent | ~1.0s | ~9.6 req/s | **10x** |
+| **Single-threaded** | Sequential | ~10.2s | ~0.98 req/s | 1x |
+
+The multithreaded implementation demonstrates a tenfold performance improvement compared to the single-threaded version. When processing ten requests with a one-second delay each, the multithreaded server completes all requests in approximately one second by handling them concurrently, while the single-threaded server requires over ten seconds as it processes each request sequentially.
 
 ---
 
-## Running with Docker Compose
+## Part 2: Request Counter with Race Condition Demonstration
 
-### Prerequisites
-Make sure you have Docker and Docker Compose installed on your system
-### Step-by-Step Instructions
+### Understanding Race Conditions
 
-#### 1. Navigate to Project Directory
-```bash
-cd /home/user1/pr_labs/lab1
-```
+A race condition occurs when multiple threads access shared data simultaneously without proper synchronization. The term "race" refers to the threads racing to access and modify the shared resource, and the final result depends on the unpredictable timing of thread execution. This can lead to incorrect results, data corruption, or inconsistent state.
 
-#### 2. Check Files Are Present
-```bash
-ls -la
-# Should show: server.py, docker-compose.yml, Dockerfile, public/, etc.
-```
+#### The Problem (Unsafe Implementation)
 
-#### 3. Build and Start the Container
-```bash
-# Build the image and start the container
-docker-compose up --build
+In an unsafe implementation without lock protection, multiple threads can read the same value, increment it independently, and write back their results, causing lost updates. For example, if two threads both read a counter value of 5, each increments it to 6, and both write 6 back to memory, the counter shows 6 instead of the correct value of 7. This demonstrates how concurrent access without synchronization leads to incorrect results.
 
-# Expected output:
-# [+] Building 2.3s (8/8) FINISHED
-# [+] Running 1/1
-#  ✔ Container http-server  Created
-#  ✔ Container http-server  Started
-# [SERVER] Serving files from: /app/public
-# [SERVER] Starting server on 0.0.0.0:8080
-# [SERVER] Server running at http://0.0.0.0:8080
-# [SERVER] Press Ctrl+C to stop
-```
+#### The Solution (Safe Implementation)
 
-#### 4. Run in Detached Mode
-```bash
-# Run in background
-docker-compose up -d --build
+The solution uses a lock (mutex) to protect the critical section where shared data is accessed. With lock protection, only one thread at a time can execute the increment operation. When a thread acquires the lock, other threads must wait until the lock is released. This ensures that the read-modify-write operation happens atomically, preventing race conditions and guaranteeing correct counter values.
 
-# Check if running:
-docker-compose ps
-```
+### Demonstrating the Race Condition
 
-#### 5. View Server Logs
-```bash
-# View real-time logs
-docker-compose logs -f file-server
-
-# View recent logs
-docker-compose logs --tail=50 file-server
-```
-
-#### 6. Stop the Server
-```bash
-# Stop the container
-docker-compose down
-
-```
-
----
-
-## Server Command Inside Container
-
-The server runs inside the container with the following command:
+#### Option 1: Using the Unsafe Server Implementation
 
 ```bash
-python3 server.py /app/public 8080
+# Terminal 1: Start the UNSAFE server
+python3 server_clean.py ./public 8081 --unsafe-counter
+
+# Terminal 2: Make 20 concurrent requests
+python3 test_concurrent.py localhost 8081 20 /test.txt
+
+# Stop the server (Ctrl+C)
+# Output shows INCORRECT count (e.g., 8 instead of 20)
 ```
 
-**Arguments:**
-- `/app/public` - Directory to serve files from (mapped to ./public on host)
-- `8080` - Port number to listen on
-
-**Volume Mapping:**
-- Host directory `./public/` is mounted to `/app/public/` inside the container
-- Changes to files in `./public/` are immediately reflected in the server
-
----
-
-## Contents of Served Directory (public/)
-
-The `public/` directory contains:
-
+**Server Output:**
 ```
-public/
-├── index.html              # HTML file with content
-├── test-image.png          # PNG image file
-├── test.txt               # Text file
-├── utm_logo.png           # Another PNG image
-├── empty_folder/          # Empty directory
-└── folder/                # Directory with subdirectories
-    ├── sample.txt         # Text file in subdirectory
-    └── subfolder/         # Nested subdirectory
-        ├── nested.txt     # Text file in nested location
-        └── sample.pdf     # PDF file in nested location
+======================================================================
+SERVER STATISTICS
+======================================================================
+File Request Counts:
+  test.txt: 8 requests    (WRONG! Should be 20!)
+======================================================================
 ```
 
----
+When running the unsafe server with concurrent requests, the final counter value is significantly lower than the actual number of requests made. This clearly demonstrates the race condition problem where multiple threads interfere with each other's updates, resulting in lost increments.
 
-## User Interface Screenshots and Explanations
+### Comparing Safe vs Unsafe
 
-### Figure 1: Directory Listing Interface
+```bash
+# Test 1: UNSAFE counter
+python3 server_clean.py ./public 8081 --unsafe-counter
+python3 test_concurrent.py localhost 8081 20 /test.txt
+# Result: Counter shows approximately 8 (WRONG!)
 
-When you navigate to `http://localhost:8080/`, you see the main directory listing:
+# Test 2: SAFE counter
+python3 server_clean.py ./public 8080
+python3 test_concurrent.py localhost 8080 20 /test.txt
+# Result: Counter shows 20 (CORRECT!)
+```
+
+### Viewing Request Counts
+
+Access the directory listing at `http://localhost:8080/` to see the Requests column showing file and directory access counts:
+
+![alt text](figures/image1.png)
+
+When making multiple faster requests than the rate limit you get a 429 Error Response:
 
 ![alt text](figures/image2.png)
 
-**UI Features Explained:**
-- **Header Section**: Shows current path and item count
-- **File Table**: Organized columns for Name, Size, Type, and Download
-- **Directory Icons**
-- **File Types**: Automatically detected (HTML Document, Image File, etc.)
-- **Download Links**
-- **Hover Effects**: Rows highlight when mouse hovers over them
+**Thread Safety Implementation:**
 
-### Figure 2: Subdirectory Navigation
-
-When clicking on `📁 folder/`, you navigate to `http://localhost:8080/folder/`:
-
-![alt text](figures/image3.png)
-
-**Navigation Features:**
-- **Parent Directory Link**: Easy navigation back to parent folder
-- **Breadcrumb Path**: Shows current location `/folder/`
-- **Nested Structure**: Can browse multiple directory levels
-
-### Figure 3: File Viewing - HTML Content
-
-When clicking on `index.html`, the browser displays the HTML content directly:
-
-![alt text](figures/image4.png)
-
-### Figure 4: Error Page - 404 Not Found
-
-When requesting a non-existent file like `http://localhost:8080/missing.txt`:
-
-![alt text](figures/image5.png)
-
+```python
+class CounterService:
+    def __init__(self):
+        self._counter = defaultdict(int)
+        self._lock = threading.Lock()
+    
+    def increment(self, file_path: str) -> int:
+        with self._lock:
+            self._counter[file_path] += 1
+            return self._counter[file_path]
+```
 
 ---
 
-## Browser Requests Testing
+## Part 3: Rate Limiting Implementation
 
-### 1. Inexistent File (404 Error)
+### How Rate Limiting Works
 
-**Request:** `http://localhost:8080/nonexistent.txt`
+The server implements a sliding window rate limiter that restricts each client IP address to a maximum of five requests per second. The algorithm works by tracking the timestamp of each request in a list associated with the client's IP address. When a new request arrives, the rate limiter first removes all timestamps that fall outside the one-second time window, then checks if the number of remaining timestamps is below the limit. If the limit has not been exceeded, the new request is allowed and its timestamp is recorded. Otherwise, the request is rejected with an HTTP 429 status code.
 
-**Response:**
-```
-HTTP/1.1 404 Not Found
-Content-Type: text/html
-Content-Length: [size]
-Connection: close
+The implementation is thread-safe, using locks to prevent race conditions when multiple threads access the timestamp data simultaneously. This ensures accurate rate limiting even under high concurrent load.
 
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>Error {code}</title>
-    <style>
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Liberation Sans', Arial, sans-serif;
-            margin: 0;
-            padding: 30px;
-            background: #fafafa;
-            color: #333;
-            line-height: 1.5;
-        }}
-        .header {{
-            background: #fff;
-            border: 1px solid #ddd;
-            margin-bottom: 20px;
-            padding: 20px 25px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        }}
-        h1 {{
-            font-size: 24px;
-            margin: 0;
-            font-weight: 400;
-            color: #2c3e50;
-            border-bottom: 2px solid #3498db;
-            padding-bottom: 10px;
-        }}
-        .path-info {{
-            margin-top: 10px;
-            font-size: 14px;
-            color: #666;
-        }}
-        .error-box {{
-            background: #fff;
-            border: 1px solid #ddd;
-            padding: 25px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        }}
-        .error-title {{
-            color: #c0392b;
-            font-weight: 600;
-            margin: 0 0 8px 0;
-        }}
-        .error-message {{
-            color: #666;
-            margin: 0 0 16px 0;
-        }}
-        .actions {{
-            margin-top: 10px;
-        }}
-        .file-link {{
-            color: #1976d2;
-            text-decoration: none;
-            font-weight: 500;
-            display: inline-block;
-            padding: 8px 14px;
-            border: 1px solid #1976d2;
-            border-radius: 6px;
-        }}
-        .file-link:hover {{
-            color: #0d47a1;
-            border-color: #0d47a1;
-            text-decoration: none;
-            background: #e3f2fd;
-        }}
-        .footer {{
-            margin-top: 20px;
-            padding: 15px;
-            background: #fff;
-            border: 1px solid #ddd;
-            text-align: center;
-            font-size: 12px;
-            color: #666;
-        }}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>Error 404</h1>
-        <div class="path-info">An error occurred while processing your request.</div>
-    </div>
-
-    <div class="error-box">
-        <p class="error-title">Status: 404</p>
-        <p class="error-message">Not found</p>
-        <div class="actions">
-            <a href="/" class="file-link">Return to Home</a>
-        </div>
-    </div>
-
-    <div class="footer">
-        HTTP File Server
-    </div>
-</body>
-</html>
+```python
+class RateLimiter:
+    def __init__(self, max_requests=5, time_window=1.0):
+        self._max_requests = max_requests
+        self._time_window = time_window
+        self._request_timestamps = defaultdict(list)
+        self._lock = threading.Lock()
+    
+    def is_allowed(self, client_ip: str) -> Tuple[bool, int]:
+        with self._lock:
+            # Remove old timestamps outside window
+            timestamps[:] = [ts for ts in timestamps 
+                           if current_time - ts < self._time_window]
+            
+            # Check if under limit
+            if len(timestamps) < self._max_requests:
+                timestamps.append(current_time)
+                return True, remaining
+            return False, 0
 ```
 
-### 2. HTML File with Image
+### Testing Rate Limiting
 
-**Request:** `http://localhost:8080/index.html`
-
-**Response:**
-```
-HTTP/1.1 200 OK
-Content-Type: text/html
-Content-Length: [size]
-Connection: close
-
-[HTML content from index.html file]
-```
-
-The browser displays the HTML page. If the HTML references images (like utm_logo.png), the browser will make additional requests for those image files.
-
-### 3. PDF File
-
-**Request:** `http://localhost:8080/folder/subfolder/sample.pdf`
-
-**Response:**
-```
-HTTP/1.1 200 OK
-Content-Type: application/pdf
-Content-Length: [size]
-Connection: close
-
-[Binary PDF content]
-```
-
-The browser either displays the PDF in its built-in viewer or prompts for download.
-
-### 4. PNG File
-
-**Request:** `http://localhost:8080/utm_logo.png`
-
-**Response:**
-```
-HTTP/1.1 200 OK
-Content-Type: image/png
-Content-Length: [size]
-Connection: close
-
-[Binary PNG image data]
-```
-
-The browser displays the PNG image directly.
-
----
-
-## HTTP Client Usage
-
-### Running the Client
+#### Test 1: Spam Requests
 
 ```bash
-python3 client.py <host> <port> <path> [download_directory]
-```
-
-### Example Client Commands and Output
-
-#### 1. Download a Text File
-
-```bash
-python3 client.py localhost 8080 /test.txt
+python3 test_rate_limit.py localhost 8080 spam 10
 ```
 
 **Output:**
 ```
-[CLIENT] Connecting to localhost:8080
-[REQUEST] /test.txt
-[STATUS] 200
-[CONTENT] Type: text/plain
-[SIZE] [file_size] bytes
-[SAVED] ./client_saves/test.txt
-
-================================================================================
-CONTENT DISPLAY
-Content-Type: text/plain
-================================================================================
-[Text file content displayed here]
-================================================================================
-
-[SUCCESS] File saved to: ./client_saves/test.txt
-[INFO] Download directory: /home/user1/pr_labs/lab1/client_saves
+======================================================================
+[Spammer] RESULTS:
+  Duration: 10.03s
+  Total requests: 847
+  Successful (200): 50
+  Rate limited (429): 797
+  Request rate: 84.45 req/s
+  Success rate: 4.98 req/s
+  Success ratio: 5.9%
+======================================================================
 ```
 
-#### 2. Download a PDF File
+The spam test demonstrates the effectiveness of rate limiting. Even though the client attempted to send 847 requests at a rate of 84.45 requests per second, only approximately 50 requests succeeded, with 797 being blocked. The successful request rate of approximately 5 requests per second matches the configured rate limit, showing that the rate limiter effectively throttles excessive traffic.
+
+#### Test 2: Controlled Requests
 
 ```bash
-python3 client.py localhost 8080 /folder/subfolder/sample.pdf
+python3 test_rate_limit.py localhost 8080 controlled 10
 ```
 
 **Output:**
 ```
-[CLIENT] Connecting to localhost:8080
-[REQUEST] /folder/subfolder/sample.pdf
-[STATUS] 200
-[CONTENT] Type: application/pdf
-[SIZE] [file_size] bytes
-[SAVED] ./client_saves/sample.pdf
-
-[SUCCESS] File saved to: ./client_saves/sample.pdf
-[INFO] Download directory: /home/user1/pr_labs/lab1/client_saves
+======================================================================
+[Controlled] RESULTS:
+  Duration: 10.02s
+  Total requests: 45
+  Successful (200): 45
+  Rate limited (429): 0
+  Success rate: 4.49 req/s
+  Success ratio: 100.0%
+======================================================================
 ```
 
-#### 3. Download a PNG Image
+The controlled test shows that well-behaved clients staying under the rate limit experience no blocking. By sending requests at 4.5 requests per second (below the 5 requests per second limit), all 45 requests succeeded with a 100% success ratio and zero rate-limited responses.
+
+#### Test 3: Both Tests with Comparison
 
 ```bash
-python3 client.py localhost 8080 /utm_logo.png
+python3 test_rate_limit.py localhost 8080 both 10
 ```
 
 **Output:**
 ```
-[CLIENT] Connecting to localhost:8080
-[REQUEST] /utm_logo.png
-[STATUS] 200
-[CONTENT] Type: image/png
-[SIZE] [file_size] bytes
-[SAVED] ./client_saves/utm_logo.png
+======================================================================
+COMPARISON
+======================================================================
+Spammer throughput:    4.98 successful req/s
+Controlled throughput: 4.49 successful req/s
 
-[SUCCESS] File saved to: ./client_saves/utm_logo.png
-[INFO] Download directory: /home/user1/pr_labs/lab1/client_saves
+Spammer was rate-limited 797 times
+Controlled was rate-limited 0 times
+======================================================================
 ```
 
-### Client Saved Files
+## Key Concepts Demonstrated
 
-The client saves all downloaded files to the `client_saves/` directory:
+### 1. Concurrency vs Parallelism
+Concurrency refers to multiple tasks making progress through thread interleaving. This provides better resource utilization and responsiveness, resulting in a tenfold performance improvement in our tests.
 
-```
-client_saves/
-├── sample.pdf      # Downloaded PDF file
-├── sample.txt      # Downloaded text file
-└── utm_logo.png    # Downloaded image file
+### 2. Race Conditions
+Race conditions occur when multiple threads access shared data simultaneously without synchronization. The symptoms include lost updates and incorrect counter values, such as 20 requests producing a counter value of only 8. The cause is the lack of synchronization between threads accessing the shared resource.
+
+### 3. Thread Synchronization
+Thread synchronization uses locks (mutex) to protect critical sections of code. The mechanism ensures atomic operations by allowing only one thread to execute the critical section at a time. After implementing proper synchronization, the counter correctly shows 20 requests.
+
+### 4. Rate Limiting
+Rate limiting prevents abuse and ensures fair resource usage. The sliding window algorithm tracks timestamps of each request and blocks requests that exceed the limit. The implementation is highly effective, blocking 94% of spam requests while maintaining a 100% success rate for well-behaved clients.
+
+
+## Docker Deployment
+You can tweak the server mode settings by editing the server.conf file.
+Just make sure to restart the docker container if changes are to be applied.
+Run the multithreaded server in Docker:
+
+```bash
+# Build and start
+docker-compose up --build -d
+
+# Stop
+docker-compose down
 ```
 
 ---
-
-## Directory Listing Feature
-
-The server automatically generates styled HTML directory listings when browsing directories.
-
-### Directory Listing Example
-
-**Request:** `http://localhost:8080/folder/`
-
-**Response:** A styled HTML page showing:
-- Parent directory link (📁 Parent Directory)
-- Subdirectories with folder icons (📁 subfolder/)
-- Files with their sizes, types, and download links
-- Formatted table layout with hover effects
-- File size information in human-readable format
-
-### Subdirectory Browsing
-
-**Request:** `http://localhost:8080/folder/subfolder/`
-
-**Response:** Directory listing showing:
-- Parent Directory link back to /folder/
-- nested.txt file with size and download option
-- sample.pdf file with size and download option
-
-The directory listing feature provides a complete web-based file browser interface with modern styling and functionality.
-
----
-
-## Making the Server Accessible to Other Devices on Local Network
-
-### Understanding Network Access
-
-By default, the Docker container binds to `0.0.0.0:8080`, which means it accepts connections from any network interface. However, to access it from other devices, you need to configure your network properly. In the following steps I am going to illustrate how I setup the server to be locally accesible from my Ubuntu distro Windows Subsystem for Linux Setup.
-
-### Step 1: Find Your Server's IP Address
-
-#### On Linux WSL:
-```bash
-# Get your local IP address
-hostname -I
-
-# Example output: 172.23.91.94
-```
-
-### Step 2: Verify Server is Running
-
-```bash
-# Check if container is running
-docker compose ps
-
-# Should show:
-# NAME         IMAGE              COMMAND                  SERVICE      STATUS    PORTS
-# http-server  lab1-file-server   "python3 server.py /…"   file-server  Up        0.0.0.0:8080->8080/tcp
-```
-
-### Step 3: Test Local Access First
-
-```bash
-# Test from the same machine
-curl http://172.23.91.94:8080/
-```
-
-### Step 4: Configure Port Forwarding (Windows PowerShell as Administrator)
-
-
-```powershell
-# On Windows host - run PowerShell as Administrator
-# Forward port 8080 from Windows to WSL
-netsh interface portproxy add v4tov4 listenport=8080 listenaddress=0.0.0.0 connectport=8080 connectaddress=172.23.91.94
-
-```
-
-### Step 5: Access from Other Devices
-
-#### From Another Computer:
-1. Open a web browser on the other device
-2. Navigate to: `http://[SERVER_IP]:8080`
-
-#### From Mobile Device:
-1. Connect to the same Wi-Fi network
-2. Open browser and go to: `http://[SERVER_IP]:8080`
-
-![Server Access from Browser](figures/image.png)
-
-
-#### Using the HTTP Client from Another Device:
-```bash
-# Download and run the client on another machine
-python3 client.py [SERVER_IP] 8080 /test.txt
-
-# Example:
-python3 client.py 192.168.1.100 8080 /utm_logo.png
-```
-
-### Security Considerations
-
-1. **Local Network Only**: This setup only works on local networks (LAN)
-2. **File Access**: Anyone with network access can download all files
-
 
 ## Conclusions
 
-This HTTP file server project shows how networking works using TCP sockets and the HTTP protocol. It acts as a small web server that can handle requests, send responses, and serve files to users.
+This laboratory work ilustrates three main ideas in concurrent programming that are important for building reliable and fast server applications.
 
-The server fully follows the HTTP/1.1 standard. It includes correct headers, status codes, and automatic detection of file types. It also keeps things safe by blocking access outside the main folder and showing clear error messages when something goes wrong.
+Multithreading can make a server much faster. Handling requests at the same time is quicker than doing them one by one. Using thread pools helps by reusing threads instead of creating new ones for each request, saving time and resources.
 
-The web interface is simple and easy to use. It shows folders and files in a clean table layout, allowing users to browse and download files directly from their browser.
+Race conditions happen when multiple threads try to change the same data at the same time without proper control. In the unsafe counter example, some updates were lost, so when twenty requests were made at once, the counter only showed eight. Using locks fixed the problem, and all twenty requests were counted correctly.
 
-The project works on any system thanks to Docker, which makes setup and deployment quick and consistent. It can also be accessed from other devices on the same local network, making it useful for sharing files easily.
+Rate limiting stops misuse while still serving normal clients fairly. The server blocked most spam requests that tried to overload it, while letting requests under the limit go through. Thread-safe programming ensures the rate limiter works correctly even when many requests happen at the same time.
 
-It supports many types of files, such as HTML, images, PDFs, and text files. A separate client program can also be used to download files automatically through the server.
-
-Overall, this project is a good starting point for learning how the HTTP protocol works, how to use sockets in networking, and how web servers are built. It follows security best practices while keeping the design modern and practical.
+The main point is that concurrent programming can make servers faster, but it must be done more carefully to avoid errors. Using locks and safe data structures keeps results correct and predictable. Combining multithreading, proper synchronization, and rate limiting creates a server that is fast, reliable, and safe to use.

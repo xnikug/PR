@@ -1,505 +1,258 @@
-#!/usr/bin/env python3
-
 import socket
-import os
 import sys
-from pathlib import Path
-from urllib.parse import unquote
+import os
+from concurrent.futures import ThreadPoolExecutor
 
-# MIME types for common file extensions
-MIME_TYPES = {
-    '.html': 'text/html',
-    '.htm': 'text/html',
-    '.pdf': 'application/pdf',
-    '.png': 'image/png',
-    '.jpg': 'image/jpeg',
-    '.jpeg': 'image/jpeg',
-    '.gif': 'image/gif',
-    '.txt': 'text/plain',
-    '.css': 'text/css',
-    '.js': 'application/javascript'
-}
+# Add src to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
-def get_mime_type(filename):
-    """Get MIME type based on file extension"""
-    ext = Path(filename).suffix.lower()
-    return MIME_TYPES.get(ext, 'application/octet-stream')
+from src.http import RequestParser, ResponseBuilder
+from src.services import CounterService, UnsafeCounterService, RateLimiter
+from src.handlers import RequestHandler
 
-def format_file_size(size_bytes):
-    """Format file size in human readable format"""
-    if size_bytes == 0:
-        return "0 B"
-    size_names = ["B", "KB", "MB", "GB", "TB"]
-    import math
-    i = int(math.floor(math.log(size_bytes, 1024)))
-    p = math.pow(1024, i)
-    s = round(size_bytes / p, 2)
-    return f"{s} {size_names[i]}"
 
-def generate_directory_listing(directory_path, url_path):
-    """Generate HTML directory listing with table format"""
-    try:
-        items = sorted(os.listdir(directory_path))
-    except PermissionError:
-        return None
+class HttpServer:
+    """Main HTTP server class."""
     
-    if not url_path.endswith('/'):
-        url_path += '/'
-    
-    html = f"""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>Index of {url_path}</title>
-    <style>
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Liberation Sans', Arial, sans-serif;
-            margin: 0;
-            padding: 30px;
-            background: #fafafa;
-            color: #333;
-            line-height: 1.5;
-        }}
-        .header {{
-            background: #fff;
-            border: 1px solid #ddd;
-            margin-bottom: 20px;
-            padding: 20px 25px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        }}
-        h1 {{
-            font-size: 24px;
-            margin: 0;
-            font-weight: 400;
-            color: #2c3e50;
-            border-bottom: 2px solid #3498db;
-            padding-bottom: 10px;
-        }}
-        .path-info {{
-            margin-top: 10px;
-            font-size: 14px;
-            color: #666;
-        }}
-        .file-table {{
-            width: 100%;
-            border-collapse: collapse;
-            background: #fff;
-            border: 2px solid #ddd;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        }}
-        .file-table th {{
-            background: #f8f9fa;
-            border: 1px solid #ddd;
-            border-bottom: 2px solid #ddd;
-            padding: 12px 15px;
-            text-align: left;
-            font-weight: 600;
-            font-size: 13px;
-            color: #495057;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }}
-        .file-table td {{
-            border: 1px solid #ddd;
-            padding: 10px 15px;
-            font-size: 14px;
-            vertical-align: middle;
-        }}
-        .file-table tr:nth-child(even) {{
-            background: #f8f9fa;
-        }}
-        .file-table tr:hover {{
-            background: #e3f2fd;
-            transition: background-color 0.15s ease;
-        }}
-        .file-link {{
-            color: #1976d2;
-            text-decoration: none;
-            font-weight: 500;
-            display: inline-block;
-            padding: 2px 0;
-        }}
-        .file-link:hover {{
-            color: #0d47a1;
-            text-decoration: underline;
-        }}
-        .file-link:visited {{
-            color: #7b1fa2;
-        }}
-        .directory {{
-            font-weight: 600;
-        }}
-        .file-size {{
-            color: #666;
-            font-family: 'Courier New', monospace;
-            font-size: 13px;
-        }}
-        .file-type {{
-            color: #666;
-            font-size: 13px;
-        }}
-        .dir-emoji {{
-            margin-right: 6px;
-            font-size: 16px;
-        }}
-        .parent-dir {{
-            color: #666;
-            font-style: italic;
-        }}
-        .footer {{
-            margin-top: 20px;
-            padding: 15px;
-            background: #fff;
-            border: 1px solid #ddd;
-            text-align: center;
-            font-size: 12px;
-            color: #666;
-        }}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>Index of {url_path}</h1>
-        <div class="path-info">Directory listing • {len(items)} item{'s' if len(items) != 1 else ''}</div>
-    </div>
-    
-    <table class="file-table">
-        <thead>
-            <tr>
-                <th>Name</th>
-                <th class="size-header" style="width: 100px;">Size</th>
-                <th style="width: 150px;">Type</th>
-                <th style="width: 100px;">Download</th>
-            </tr>
-        </thead>
-        <tbody>
-"""
-    
-    # Add parent directory link if not root
-    if url_path != '/':
-        parent_path = '/'.join(url_path.rstrip('/').split('/')[:-1]) or '/'
-        html += f'''            <tr>
-                <td>
-                    <span class="dir-emoji">📁</span>
-                    <a href="{parent_path}" class="file-link directory parent-dir">Parent Directory</a>
-                </td>
-                <td class="file-size">-</td>
-                <td class="file-type">Directory</td>
-                <td>-</td>
-            </tr>
-'''
-    
-    # Add files and directories
-    for item in items:
-        item_path = os.path.join(directory_path, item)
-        item_url = url_path + item
+    def __init__(
+        self,
+        directory: str,
+        host: str = '0.0.0.0',
+        port: int = 8080,
+        use_threads: bool = True,
+        max_workers: int = None,
+        enable_rate_limiting: bool = True,
+        rate_limit: int = 5,
+        simulate_delay: bool = False,
+        delay_time: float = 1.0,
+        use_unsafe_counter: bool = False
+    ):
+        """
+        Initialize HTTP server.
         
-        if os.path.isdir(item_path):
-            html += f'''            <tr>
-                <td>
-                    <span class="dir-emoji">📁</span>
-                    <a href="{item_url}/" class="file-link directory">{item}</a>
-                </td>
-                <td class="file-size">-</td>
-                <td class="file-type">Directory</td>
-                <td>-</td>
-            </tr>
-'''
+        Args:
+            directory: Directory to serve files from
+            host: Host address to bind to
+            port: Port number to listen on
+            use_threads: Whether to use multithreading
+            max_workers: Maximum number of worker threads
+            enable_rate_limiting: Whether to enable rate limiting
+            rate_limit: Maximum requests per second per IP
+            simulate_delay: Whether to simulate processing delay
+            delay_time: Delay time in seconds
+            use_unsafe_counter: Whether to use unsafe counter (for race condition demo)
+        """
+        if not os.path.isdir(directory):
+            raise ValueError(f"Directory '{directory}' does not exist")
+        
+        self.directory = os.path.abspath(directory)
+        self.host = host
+        self.port = port
+        self.use_threads = use_threads
+        self.max_workers = max_workers
+        self.use_unsafe_counter = use_unsafe_counter
+        
+        # Initialize services
+        if use_unsafe_counter:
+            self.counter_service = UnsafeCounterService(delay=0.01)
+            print("[WARNING] Using UNSAFE counter - race conditions will occur!")
         else:
-            try:
-                file_size = os.path.getsize(item_path)
-                size_str = format_file_size(file_size)
-                
-                # Determine file type description
-                ext = Path(item).suffix.lower()
-                if ext in ['.html', '.htm']:
-                    file_type = 'HTML Document'
-                elif ext in ['.txt', '.md']:
-                    file_type = 'Text Document'
-                elif ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp']:
-                    file_type = 'Image File'
-                elif ext == '.pdf':
-                    file_type = 'PDF Document'
-                elif ext == '.py':
-                    file_type = 'Python Script'
-                elif ext in ['.js']:
-                    file_type = 'JavaScript File'
-                elif ext in ['.css']:
-                    file_type = 'CSS Stylesheet'
-                elif ext in ['.json']:
-                    file_type = 'JSON Data'
-                elif ext in ['.xml']:
-                    file_type = 'XML Document'
-                else:
-                    file_type = 'File' if not ext else f'{ext[1:].upper()} File'
-                
-                html += f'''            <tr>
-                <td><a href="{item_url}" class="file-link">{item}</a></td>
-                <td class="file-size">{size_str}</td>
-                <td class="file-type">{file_type}</td>
-                <td><a href="{item_url}" class="file-link" download>💾 Download</a></td>
-            </tr>
-'''
-            except OSError:
-                html += f'''            <tr>
-                <td><a href="{item_url}" class="file-link">{item}</a></td>
-                <td class="file-size">-</td>
-                <td class="file-type">File</td>
-                <td><a href="{item_url}" class="file-link" download>💾 Download</a></td>
-            </tr>
-'''
+            self.counter_service = CounterService()
+        
+        self.rate_limiter = RateLimiter(max_requests=rate_limit) if enable_rate_limiting else None
+        
+        # Initialize request handler
+        self.request_handler = RequestHandler(
+            base_directory=self.directory,
+            counter_service=self.counter_service,
+            rate_limiter=self.rate_limiter,
+            simulate_delay=simulate_delay,
+            delay_time=delay_time
+        )
+        
+        self.server_socket = None
     
-    html += f"""        </tbody>
-    </table>
-    
-    <div class="footer">
-        HTTP File Server • Serving {len([item for item in items if os.path.isfile(os.path.join(directory_path, item))])} files and {len([item for item in items if os.path.isdir(os.path.join(directory_path, item))])} directories
-    </div>
-</body>
-</html>"""
-    
-    return html
-
-def create_http_response(status_code, status_text, content_type, body):
-    """Create HTTP response"""
-    if isinstance(body, str):
-        body = body.encode('utf-8')
-    
-    response = f"HTTP/1.1 {status_code} {status_text}\r\n"
-    response += f"Content-Type: {content_type}\r\n"
-    response += f"Content-Length: {len(body)}\r\n"
-    response += "Connection: close\r\n"
-    response += "\r\n"
-    
-    return response.encode('utf-8') + body
-
-def create_error_response(code, message):
-    """Create simple error response"""
-    html = f"""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>Error {code}</title>
-    <style>
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Liberation Sans', Arial, sans-serif;
-            margin: 0;
-            padding: 30px;
-            background: #fafafa;
-            color: #333;
-            line-height: 1.5;
-        }}
-        .header {{
-            background: #fff;
-            border: 1px solid #ddd;
-            margin-bottom: 20px;
-            padding: 20px 25px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        }}
-        h1 {{
-            font-size: 24px;
-            margin: 0;
-            font-weight: 400;
-            color: #2c3e50;
-            border-bottom: 2px solid #3498db;
-            padding-bottom: 10px;
-        }}
-        .path-info {{
-            margin-top: 10px;
-            font-size: 14px;
-            color: #666;
-        }}
-        .error-box {{
-            background: #fff;
-            border: 1px solid #ddd;
-            padding: 25px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        }}
-        .error-title {{
-            color: #c0392b;
-            font-weight: 600;
-            margin: 0 0 8px 0;
-        }}
-        .error-message {{
-            color: #666;
-            margin: 0 0 16px 0;
-        }}
-        .actions {{
-            margin-top: 10px;
-        }}
-        .file-link {{
-            color: #1976d2;
-            text-decoration: none;
-            font-weight: 500;
-            display: inline-block;
-            padding: 8px 14px;
-            border: 1px solid #1976d2;
-            border-radius: 6px;
-        }}
-        .file-link:hover {{
-            color: #0d47a1;
-            border-color: #0d47a1;
-            text-decoration: none;
-            background: #e3f2fd;
-        }}
-        .footer {{
-            margin-top: 20px;
-            padding: 15px;
-            background: #fff;
-            border: 1px solid #ddd;
-            text-align: center;
-            font-size: 12px;
-            color: #666;
-        }}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>Error {code}</h1>
-        <div class="path-info">An error occurred while processing your request.</div>
-    </div>
-
-    <div class="error-box">
-        <p class="error-title">Status: {code}</p>
-        <p class="error-message">{message}</p>
-        <div class="actions">
-            <a href="/" class="file-link">Return to Home</a>
-        </div>
-    </div>
-
-    <div class="footer">
-        HTTP File Server
-    </div>
-</body>
-</html>"""
-    return html
-
-def handle_request(client_socket, base_directory):
-    """Handle HTTP request"""
-    try:
-        # Receive request
-        request_data = client_socket.recv(4096).decode('utf-8')
-        if not request_data:
-            return
-        
-        # Parse request line
-        lines = request_data.split('\r\n')
-        request_line = lines[0]
-        print(f"[REQUEST] {request_line}")
-        
-        parts = request_line.split()
-        if len(parts) < 2:
-            return
-        
-        method, url_path = parts[0], unquote(parts[1])
-        
-        # Only handle GET requests
-        if method != 'GET':
-            error_html = create_error_response(405, "Method Not Allowed")
-            response = create_http_response(405, "Method Not Allowed", "text/html", error_html)
-            client_socket.sendall(response)
-            return
-        
-        # Remove leading slash
-        if url_path.startswith('/'):
-            url_path = url_path[1:]
-        
-        # Build file path
-        file_path = os.path.normpath(os.path.join(base_directory, url_path))
-        
-        # Security check - prevent directory traversal
-        if not file_path.startswith(os.path.abspath(base_directory)):
-            error_html = create_error_response(403, "Forbidden")
-            response = create_http_response(403, "Forbidden", "text/html", error_html)
-            client_socket.sendall(response)
-            return
-        
-        # Check if file/directory exists
-        if not os.path.exists(file_path):
-            error_html = create_error_response(404, "Not Found")
-            response = create_http_response(404, "Not Found", "text/html", error_html)
-            client_socket.sendall(response)
-            return
-        
-        # Handle directory
-        if os.path.isdir(file_path):
-            # Always generate directory listing for browsing
-            listing_html = generate_directory_listing(file_path, '/' + url_path)
-            if listing_html is None:
-                error_html = create_error_response(403, "Directory access denied")
-                response = create_http_response(403, "Forbidden", "text/html", error_html)
-            else:
-                response = create_http_response(200, "OK", "text/html", listing_html)
-            client_socket.sendall(response)
-            return
-        
-        # Serve file
+    def _handle_client(self, client_socket: socket.socket, client_address: tuple):
+        """Handle individual client connection."""
         try:
-            with open(file_path, 'rb') as f:
-                file_content = f.read()
-                
-            mime_type = get_mime_type(file_path)
-            response = create_http_response(200, "OK", mime_type, file_content)
-            client_socket.sendall(response)
-            print(f"[SERVED] {file_path} ({mime_type})")
+            # Receive request data
+            request_data = client_socket.recv(4096).decode('utf-8')
+            if not request_data:
+                return
+            
+            # Parse request
+            request = RequestParser.parse(request_data, client_address[0])
+            if not request:
+                return
+            
+            # Handle request
+            response = self.request_handler.handle(request)
+            
+            # Send response
+            client_socket.sendall(response.to_bytes())
             
         except Exception as e:
-            print(f"[ERROR] Reading file: {e}")
-            error_html = create_error_response(500, "Internal Server Error")
-            response = create_http_response(500, "Internal Server Error", "text/html", error_html)
-            client_socket.sendall(response)
-    
-    except Exception as e:
-        print(f"[ERROR] Request handling: {e}")
-    
-    finally:
-        try:
-            client_socket.close()
-        except:
-            pass
-
-def start_server(directory, host='0.0.0.0', port=8080):
-    """Start the HTTP server"""
-    if not os.path.isdir(directory):
-        print(f"[ERROR] Directory '{directory}' does not exist")
-        sys.exit(1)
-    
-    base_directory = os.path.abspath(directory)
-    print(f"[SERVER] Serving files from: {base_directory}")
-    print(f"[SERVER] Starting server on {host}:{port}")
-    
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    
-    try:
-        server_socket.bind((host, port))
-        server_socket.listen(5)
-        print(f"[SERVER] Server running at http://{host}:{port}")
-        print("[SERVER] Press Ctrl+C to stop")
+            print(f"[ERROR] Client handling: {e}")
+            try:
+                error_response = ResponseBuilder.internal_error(
+                    f"<html><body><h1>500 Internal Server Error</h1><p>{str(e)}</p></body></html>"
+                )
+                client_socket.sendall(error_response.to_bytes())
+            except:
+                pass
         
+        finally:
+            try:
+                client_socket.close()
+            except:
+                pass
+    
+    def start(self):
+        """Start the HTTP server."""
+        server_mode = "Multithreaded" if self.use_threads else "Single-threaded"
+        counter_mode = "UNSAFE (Race Condition Demo)" if self.use_unsafe_counter else "Thread-Safe"
+        
+        print(f"\n{'='*70}")
+        print(f"HTTP FILE SERVER")
+        print(f"{'='*70}")
+        print(f"Mode: {server_mode}")
+        print(f"Counter: {counter_mode}")
+        print(f"Serving from: {self.directory}")
+        print(f"Address: {self.host}:{self.port}")
+        if self.rate_limiter:
+            print(f"Rate limiting: Enabled (5 req/s per IP)")
+        else:
+            print(f"Rate limiting: Disabled")
+        
+        if self.use_unsafe_counter:
+            print(f"\n{'WARNING!'}")
+            print(f"Running with UNSAFE counter to demonstrate race conditions!")
+            print(f"Expect incorrect counter values with concurrent requests.")
+        
+        print(f"{'='*70}\n")
+        
+        # Create socket
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
+        try:
+            self.server_socket.bind((self.host, self.port))
+            self.server_socket.listen(5)
+            
+            print(f"[SERVER] Running at http://{self.host}:{self.port}")
+            print(f"[SERVER] Press Ctrl+C to stop\n")
+            
+            if self.use_threads:
+                self._run_multithreaded()
+            else:
+                self._run_single_threaded()
+        
+        except KeyboardInterrupt:
+            print("\n[SERVER] Stopping server...")
+            self._print_statistics()
+        
+        except Exception as e:
+            print(f"[ERROR] Server error: {e}")
+        
+        finally:
+            if self.server_socket:
+                self.server_socket.close()
+    
+    def _run_multithreaded(self):
+        """Run server in multithreaded mode."""
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            while True:
+                try:
+                    client_socket, address = self.server_socket.accept()
+                    print(f"[CONNECTION] {address[0]}:{address[1]}")
+                    executor.submit(self._handle_client, client_socket, address)
+                except Exception as e:
+                    print(f"[ERROR] Connection error: {e}")
+    
+    def _run_single_threaded(self):
+        """Run server in single-threaded mode."""
         while True:
             try:
-                client_socket, address = server_socket.accept()
-                print(f"[CONNECTION] {address}")
-                handle_request(client_socket, base_directory)
+                client_socket, address = self.server_socket.accept()
+                print(f"[CONNECTION] {address[0]}:{address[1]}")
+                self._handle_client(client_socket, address)
             except Exception as e:
                 print(f"[ERROR] Connection error: {e}")
     
-    except KeyboardInterrupt:
-        print("\n[SERVER] Stopping server...")
-    except Exception as e:
-        print(f"[ERROR] Server error: {e}")
-    
-    finally:
-        server_socket.close()
+    def _print_statistics(self):
+        """Print server statistics on shutdown."""
+        print("\n" + "="*70)
+        print("SERVER STATISTICS")
+        print("="*70)
+        
+        counts = self.counter_service.get_all_counts()
+        if counts:
+            print(f"\nFile Request Counts:")
+            total_expected = sum(counts.values())
+            for file_path, count in sorted(counts.items(), key=lambda x: x[1], reverse=True):
+                filename = os.path.basename(file_path)
+                print(f"  {filename}: {count} requests")
+            
+            if self.use_unsafe_counter:
+                print(f"The counter values above are likely incorrect due to race conditions.")
+                print(f"Compare with the safe version to see the difference.")
+        else:
+            print("\nNo files were requested")
+        
+        print("\n" + "="*70 + "\n")
 
-if __name__ == '__main__':
+
+def main():
+    """Main entry point."""
     if len(sys.argv) < 2:
-        print("Usage: python server.py <directory> [port]")
-        print("Example: python server.py ./public 8080")
+        print("Usage: python(3) server.py <directory> [port] [options]")
+        print("\nOptions:")
+        print("  --single-threaded    Run in single-threaded mode")
+        print("  --delay              Simulate 1s delay per request")
+        print("  --no-rate-limit      Disable rate limiting")
+        print("  --unsafe-counter     Use unsafe counter (demonstrates race conditions)")
+        print("\nExamples:")
+        print("  python(3) server.py ./public 8080")
+        print("  python(3) server.py ./public 8080 --delay")
+        print("  python(3) server.py ./public 8080 --single-threaded")
+        print("\n  Race Condition Demo:")
+        print("  python(3) server.py ./public 8081 --unsafe-counter")
+        print("  python(3) test_concurrent.py localhost 8081 20 /test.txt")
         sys.exit(1)
     
     directory = sys.argv[1]
-    port = int(sys.argv[2]) if len(sys.argv) > 2 else 8080
+    port = 8080
+    use_threads = True
+    simulate_delay = False
+    enable_rate_limiting = True
+    use_unsafe_counter = False
     
-    start_server(directory, port=port)
+    # Parse arguments
+    for i in range(2, len(sys.argv)):
+        arg = sys.argv[i]
+        if arg.isdigit():
+            port = int(arg)
+        elif arg == '--single-threaded':
+            use_threads = False
+        elif arg == '--delay':
+            simulate_delay = True
+        elif arg == '--no-rate-limit':
+            enable_rate_limiting = False
+        elif arg == '--unsafe-counter':
+            use_unsafe_counter = True
+    
+    # Create and start server
+    server = HttpServer(
+        directory=directory,
+        port=port,
+        use_threads=use_threads,
+        enable_rate_limiting=enable_rate_limiting,
+        simulate_delay=simulate_delay,
+        use_unsafe_counter=use_unsafe_counter
+    )
+    
+    server.start()
+
+
+if __name__ == '__main__':
+    main()
