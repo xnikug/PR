@@ -1,328 +1,379 @@
-# Lab 2: Multithreaded HTTP File Server with Concurrency Control
+# Memory Scramble Game
 
-## Project Overview
+Complete implementation of a concurrent Memory Scramble card matching game with full game rules, thread safety, and comprehensive testing.
 
-This laboratory work extends the HTTP file server from Laboratory 1 by implementing three features: Multithreaded Request Handling, Request Counter with Thread Safety, and Rate Limiting by Client IP for preventing request spam using thread-safe rate limiting
+## Table of Contents
+- [Running with Docker](#running-with-docker)
+- [Running without Docker](#running-without-docker)
+- [Running Tests](#running-tests)
+- [Running Simulation](#running-simulation)
+- [Project Architecture](#project-architecture)
+- [Game Rules](#game-rules)
+- [Documentation](#documentation)
 
----
+## Running with Docker
 
-## Lab Requirements Summary
+### Quick Start
 
-### Task 1: Multithreaded Server (Required)
-Implement a multithreaded server to handle concurrent requests, including a simulated delay of second. Create a test script to issue multiple simultaneous requests and compare the performance against a single-threaded version. Track the number of requests per file and display the counts in the directory listing, demonstrating a race condition with an unsafe implementation and then fixing it using locks (mutex) to show a clear before-and-after comparison. Implement rate limiting of approximately five requests per second per IP using thread-safe synchronization, and test the server with both spam requests and controlled requests, comparing throughput in each scenario.
-
----
-
-## Project Structure
-
-```
-/home/user1/pr_labs/lab1/
-├── server.py                    # Original multithreaded server
-├── server.conf                  # Server configuration file
-├── docker-entrypoint.conf       # Entrypoint wrapper for parsing config vars
-├── server_race_condition.py     # Unsafe server (demonstrates race condition)
-├── client.py                    # HTTP client implementation
-├── test_concurrent.py           # Concurrent request testing script
-├── test_rate_limit.py           # Rate limiting testing script
-├── Dockerfile                   # Docker configuration
-├── docker-compose.yml           # Docker Compose configuration
-├── README.md                    # Lab 1 documentation
-├── README_LAB2.md              # This file - Lab 2 documentation
-└── src/                         # Clean architecture modules
-    ├── http/                    # HTTP protocol layer
-    ├── services/                # Business logic (counter, rate limiter)
-    ├── handlers/                # Request handling
-    └── utils/                   # Utilities
-```
-
----
-
-## Part 1: Multithreaded Server Implementation
-
-### How It Works
-
-The implementation creates a thread pool that manages worker threads automatically, with each incoming request submitted to the pool for concurrent processing. When a client connects to the server, the main thread accepts the connection and immediately submits the request handling to a worker thread from the pool, allowing the main thread to continue accepting new connections without blocking.
-
-The advantage of this approach is that multiple requests can be processed simultaneously. For example, if each request takes one second to process, a single-threaded server would take ten seconds to handle ten requests sequentially. In contrast, the multithreaded server can process all ten requests concurrently, completing them in approximately one second total. This concurrent processing improves performance dramatically and provides better resource utilization and responsiveness.
-
-### Starting the Server
-
+Build and start the server using Docker Compose:
 ```bash
-# Multithreaded mode (default)
-python3 server.py ./public 8080
-
-# With 1-second delay to demonstrate concurrency
-python3 server.py ./public 8080 --delay
-
-# Single-threaded mode for comparison
-python3 server.py ./public 8080 --single-threaded
+docker-compose up
 ```
 
-### Testing Concurrent Performance
+The game will be available at http://localhost:8080
 
-Run the concurrent test script:
+### Docker Configuration
 
+The `docker-compose.yml` file configures:
+- Port mapping: 8080 (host) → 8080 (container)
+- Volume mount: `./board:/app/board:ro` (read-only access to board files)
+- Default board: `board/ab.txt` (5×5 grid with A/B cards)
+- Automatic rebuild on source changes
+
+### Using Different Board Files
+
+To use a different board file, modify the command in `docker-compose.yml`:
+```yaml
+command: node dist/src/server.js 8080 board/zoom.txt
+```
+
+Or run a standalone container:
 ```bash
-# Test with 10 concurrent requests
-python3 test_concurrent.py localhost 8080 10 /test.txt
-```
-
-**Expected Output (Multithreaded with delay):**
-```
-======================================================================
-CONCURRENT REQUEST TEST
-======================================================================
-Target: localhost:8080/test.txt
-Number of requests: 10
-Concurrent workers: 10
-======================================================================
-
-Request #1 - Status: 200 - Duration: 1.023s
-Request #2 - Status: 200 - Duration: 1.025s
-...
-Request #10 - Status: 200 - Duration: 1.041s
-
-======================================================================
-RESULTS
-======================================================================
-Total execution time: 1.045s
-Throughput: 9.60 requests/second
-======================================================================
-```
-
-**Expected Output (Single-threaded with delay):**
-```
-======================================================================
-RESULTS
-======================================================================
-Total execution time: 10.245s
-Throughput: 0.98 requests/second
-======================================================================
-```
-
-### Performance Comparison
-
-| Mode | 10 Requests | Total Time | Throughput | Speedup |
-|------|------------|------------|------------|---------|
-| **Multithreaded** | Concurrent | ~1.0s | ~9.6 req/s | **10x** |
-| **Single-threaded** | Sequential | ~10.2s | ~0.98 req/s | 1x |
-
-The multithreaded implementation demonstrates a tenfold performance improvement compared to the single-threaded version. When processing ten requests with a one-second delay each, the multithreaded server completes all requests in approximately one second by handling them concurrently, while the single-threaded server requires over ten seconds as it processes each request sequentially.
-
----
-
-## Part 2: Request Counter with Race Condition Demonstration
-
-### Understanding Race Conditions
-
-A race condition occurs when multiple threads access shared data simultaneously without proper synchronization. The term "race" refers to the threads racing to access and modify the shared resource, and the final result depends on the unpredictable timing of thread execution. This can lead to incorrect results, data corruption, or inconsistent state.
-
-#### The Problem (Unsafe Implementation)
-
-In an unsafe implementation without lock protection, multiple threads can read the same value, increment it independently, and write back their results, causing lost updates. For example, if two threads both read a counter value of 5, each increments it to 6, and both write 6 back to memory, the counter shows 6 instead of the correct value of 7. This demonstrates how concurrent access without synchronization leads to incorrect results.
-
-#### The Solution (Safe Implementation)
-
-The solution uses a lock (mutex) to protect the critical section where shared data is accessed. With lock protection, only one thread at a time can execute the increment operation. When a thread acquires the lock, other threads must wait until the lock is released. This ensures that the read-modify-write operation happens atomically, preventing race conditions and guaranteeing correct counter values.
-
-### Demonstrating the Race Condition
-
-#### Option 1: Using the Unsafe Server Implementation
-
-```bash
-# Terminal 1: Start the UNSAFE server
-python3 server_clean.py ./public 8081 --unsafe-counter
-
-# Terminal 2: Make 20 concurrent requests
-python3 test_concurrent.py localhost 8081 20 /test.txt
-
-# Stop the server (Ctrl+C)
-# Output shows INCORRECT count (e.g., 8 instead of 20)
-```
-
-**Server Output:**
-```
-======================================================================
-SERVER STATISTICS
-======================================================================
-File Request Counts:
-  test.txt: 8 requests    (WRONG! Should be 20!)
-======================================================================
-```
-
-When running the unsafe server with concurrent requests, the final counter value is significantly lower than the actual number of requests made. This clearly demonstrates the race condition problem where multiple threads interfere with each other's updates, resulting in lost increments.
-
-### Comparing Safe vs Unsafe
-
-```bash
-# Test 1: UNSAFE counter
-python3 server_clean.py ./public 8081 --unsafe-counter
-python3 test_concurrent.py localhost 8081 20 /test.txt
-# Result: Counter shows approximately 8 (WRONG!)
-
-# Test 2: SAFE counter
-python3 server_clean.py ./public 8080
-python3 test_concurrent.py localhost 8080 20 /test.txt
-# Result: Counter shows 20 (CORRECT!)
-```
-
-### Viewing Request Counts
-
-Access the directory listing at `http://localhost:8080/` to see the Requests column showing file and directory access counts:
-
-![alt text](figures/image1.png)
-
-When making multiple faster requests than the rate limit you get a 429 Error Response:
-
-![alt text](figures/image2.png)
-
-**Thread Safety Implementation:**
-
-```python
-class CounterService:
-    def __init__(self):
-        self._counter = defaultdict(int)
-        self._lock = threading.Lock()
-    
-    def increment(self, file_path: str) -> int:
-        with self._lock:
-            self._counter[file_path] += 1
-            return self._counter[file_path]
-```
-
----
-
-## Part 3: Rate Limiting Implementation
-
-### How Rate Limiting Works
-
-The server implements a sliding window rate limiter that restricts each client IP address to a maximum of five requests per second. The algorithm works by tracking the timestamp of each request in a list associated with the client's IP address. When a new request arrives, the rate limiter first removes all timestamps that fall outside the one-second time window, then checks if the number of remaining timestamps is below the limit. If the limit has not been exceeded, the new request is allowed and its timestamp is recorded. Otherwise, the request is rejected with an HTTP 429 status code.
-
-The implementation is thread-safe, using locks to prevent race conditions when multiple threads access the timestamp data simultaneously. This ensures accurate rate limiting even under high concurrent load.
-
-```python
-class RateLimiter:
-    def __init__(self, max_requests=5, time_window=1.0):
-        self._max_requests = max_requests
-        self._time_window = time_window
-        self._request_timestamps = defaultdict(list)
-        self._lock = threading.Lock()
-    
-    def is_allowed(self, client_ip: str) -> Tuple[bool, int]:
-        with self._lock:
-            # Remove old timestamps outside window
-            timestamps[:] = [ts for ts in timestamps 
-                           if current_time - ts < self._time_window]
-            
-            # Check if under limit
-            if len(timestamps) < self._max_requests:
-                timestamps.append(current_time)
-                return True, remaining
-            return False, 0
-```
-
-### Testing Rate Limiting
-
-#### Test 1: Spam Requests
-
-```bash
-python3 test_rate_limit.py localhost 8080 spam 10
-```
-
-**Output:**
-```
-======================================================================
-[Spammer] RESULTS:
-  Duration: 10.03s
-  Total requests: 847
-  Successful (200): 50
-  Rate limited (429): 797
-  Request rate: 84.45 req/s
-  Success rate: 4.98 req/s
-  Success ratio: 5.9%
-======================================================================
-```
-
-The spam test demonstrates the effectiveness of rate limiting. Even though the client attempted to send 847 requests at a rate of 84.45 requests per second, only approximately 50 requests succeeded, with 797 being blocked. The successful request rate of approximately 5 requests per second matches the configured rate limit, showing that the rate limiter effectively throttles excessive traffic.
-
-#### Test 2: Controlled Requests
-
-```bash
-python3 test_rate_limit.py localhost 8080 controlled 10
-```
-
-**Output:**
-```
-======================================================================
-[Controlled] RESULTS:
-  Duration: 10.02s
-  Total requests: 45
-  Successful (200): 45
-  Rate limited (429): 0
-  Success rate: 4.49 req/s
-  Success ratio: 100.0%
-======================================================================
-```
-
-The controlled test shows that well-behaved clients staying under the rate limit experience no blocking. By sending requests at 4.5 requests per second (below the 5 requests per second limit), all 45 requests succeeded with a 100% success ratio and zero rate-limited responses.
-
-#### Test 3: Both Tests with Comparison
-
-```bash
-python3 test_rate_limit.py localhost 8080 both 10
-```
-
-**Output:**
-```
-======================================================================
-COMPARISON
-======================================================================
-Spammer throughput:    4.98 successful req/s
-Controlled throughput: 4.49 successful req/s
-
-Spammer was rate-limited 797 times
-Controlled was rate-limited 0 times
-======================================================================
-```
-
-## Key Concepts Demonstrated
-
-### 1. Concurrency vs Parallelism
-Concurrency refers to multiple tasks making progress through thread interleaving. This provides better resource utilization and responsiveness, resulting in a tenfold performance improvement in our tests.
-
-### 2. Race Conditions
-Race conditions occur when multiple threads access shared data simultaneously without synchronization. The symptoms include lost updates and incorrect counter values, such as 20 requests producing a counter value of only 8. The cause is the lack of synchronization between threads accessing the shared resource.
-
-### 3. Thread Synchronization
-Thread synchronization uses locks (mutex) to protect critical sections of code. The mechanism ensures atomic operations by allowing only one thread to execute the critical section at a time. After implementing proper synchronization, the counter correctly shows 20 requests.
-
-### 4. Rate Limiting
-Rate limiting prevents abuse and ensures fair resource usage. The sliding window algorithm tracks timestamps of each request and blocks requests that exceed the limit. The implementation is highly effective, blocking 94% of spam requests while maintaining a 100% success rate for well-behaved clients.
-
-
-## Docker Deployment
-You can tweak the server mode settings by editing the server.conf file.
-Just make sure to restart the docker container if changes are to be applied.
-Run the multithreaded server in Docker:
-
-```bash
-# Build and start
-docker-compose up --build -d
-
-# Stop
 docker-compose down
+docker build -t memory-scramble .
+docker run -p 8080:8080 -v $(pwd)/board:/app/board:ro memory-scramble node dist/src/server.js 8080 board/zoom.txt
 ```
 
----
+### Available Board Files
 
-## Conclusions
+- **`board/ab.txt`** - 5×5 grid with alternating A and B cards (default)
+- **`board/perfect.txt`** - 3×3 grid with emoji pairs (🦄 and 🌈)
+- **`board/zoom.txt`** - 5×5 grid with zoom-themed cards
+- **`board/test.txt`** - Custom test configuration
 
-This laboratory work ilustrates three main ideas in concurrent programming that are important for building reliable and fast server applications.
+### Docker Image Details
 
-Multithreading can make a server much faster. Handling requests at the same time is quicker than doing them one by one. Using thread pools helps by reusing threads instead of creating new ones for each request, saving time and resources.
+The `Dockerfile` creates a multi-stage build:
+1. **Build stage**: Installs dependencies and compiles TypeScript
+2. **Runtime stage**: Slim Node.js image with only production dependencies
+3. **Working directory**: `/app`
+4. **Entry point**: Node.js running the compiled server
 
-Race conditions happen when multiple threads try to change the same data at the same time without proper control. In the unsafe counter example, some updates were lost, so when twenty requests were made at once, the counter only showed eight. Using locks fixed the problem, and all twenty requests were counted correctly.
+To rebuild after code changes:
+```bash
+docker-compose up --build
+```
 
-Rate limiting stops misuse while still serving normal clients fairly. The server blocked most spam requests that tried to overload it, while letting requests under the limit go through. Thread-safe programming ensures the rate limiter works correctly even when many requests happen at the same time.
+## Running without Docker
 
-The main point is that concurrent programming can make servers faster, but it must be done more carefully to avoid errors. Using locks and safe data structures keeps results correct and predictable. Combining multithreading, proper synchronization, and rate limiting creates a server that is fast, reliable, and safe to use.
+### Installation
+
+Install dependencies:
+```bash
+npm install
+```
+
+### Start the Server
+
+```bash
+npm start 8080 board/ab.txt
+```
+
+The server accepts two arguments:
+1. **Port number** (e.g., `8080`)
+2. **Board file path** (e.g., `board/ab.txt`)
+
+Access the game at http://localhost:8080
+
+## Running Tests
+
+### Run All Tests
+
+Execute the complete test suite:
+```bash
+npm test
+```
+
+This runs:
+1. TypeScript compilation (`tsc`)
+2. ESLint code quality checks
+3. Mocha test runner with all 23 unit tests
+
+### Test Suite Coverage
+
+The test suite in `test/board.test.ts` validates:
+
+**parseFromFile()**
+- ✓ Valid 3×3 board parsing
+- ✓ Valid 5×5 board parsing
+- File format validation (dimensions, card count)
+
+**look()**
+- ✓ All cards face-down initially
+- ✓ Face-up cards visible to all players
+- ✓ Controlled cards shown to controlling player
+- ✓ Removed cards displayed as "none"
+
+**flip() - First Card**
+- ✓ Flips card face-up and takes control
+- ✓ Error when flipping removed card
+
+**flip() - Second Card**
+- ✓ Removes matching pair
+- ✓ Keeps non-matching pair face-up
+- ✓ Cannot flip same card twice
+- ✓ Releases control after second flip
+- ✓ Turns non-matching pair face-down on next turn
+
+**flip() - Concurrency**
+- ✓ Multiple players flip different cards simultaneously
+- ✓ Waits for controlled card to be released
+- ✓ Handles race condition when card removed while waiting
+- ✓ Waits if card controlled by another player
+
+**map()**
+- ✓ Replaces all cards with mapped values
+- ✓ Maintains matching pairs after transformation
+- ✓ Identity map leaves board unchanged
+
+**watch()**
+- ✓ Resolves when board changes due to flip
+- ✓ Resolves when board changes due to map
+
+**Complete Game Scenarios**
+- ✓ Plays a complete matching game from start to finish
+
+### Code Coverage
+
+Generate a detailed coverage report:
+```bash
+npm run coverage
+```
+
+View the HTML coverage report:
+```bash
+open coverage/index.html  # macOS
+xdg-open coverage/index.html  # Linux
+start coverage/index.html  # Windows
+```
+
+The coverage report shows line-by-line test coverage for all source files.
+
+### Test Output
+
+All tests include descriptive messages showing:
+- Test category (e.g., "Board > flip - concurrency")
+- Test name (e.g., "waits for controlled card to be released")
+- Execution time for async tests
+- Clear assertion errors with expected vs. actual values
+
+## Running Simulation
+
+### Stress Test
+
+Run a concurrent stress test with 4 players:
+```bash
+npm run simulation
+```
+
+### Simulation Configuration
+
+The simulation (`src/simulation.ts`) creates a realistic concurrent game scenario:
+
+- **Players**: 4 concurrent players (player0, player1, player2, player3)
+- **Moves per player**: 100 attempted flips
+- **Board**: `board/zoom.txt` (5×5 grid)
+- **Delays**: Random timeouts between 0.1ms and 2ms between moves
+- **No shuffling**: Board remains static during simulation
+
+### What the Simulation Tests
+
+The simulation verifies:
+1. **Thread safety**: No crashes or deadlocks under concurrent load
+2. **Game rules enforcement**: All flip operations follow rules correctly
+3. **Error handling**: Invalid moves are caught and reported
+4. **Visual feedback**: Card flips are displayed in real-time
+
+### Simulation Output
+
+The simulation displays:
+- Player initialization messages
+- Each card flip with coordinates and revealed card
+- Match detection (successful and failed)
+- Move failures with error messages
+- Final statistics:
+  - Total moves attempted
+  - Successful matches
+  - Failed moves
+
+Example output:
+```
+Starting simulation with 4 players, 100 moves each
+Board: board/zoom.txt (5×5)
+Delays: 0.1ms - 2ms
+════════════════════════════════════════════════════════════
+
+player0 starting...
+player1 starting...
+player2 starting...
+player3 starting...
+player0: Flipping card at (0,0)...
+player0: Card 1 revealed: 🎯 at (0,0)
+player1: Flipping card at (2,3)...
+player1: Card 1 revealed: 🎨 at (2,3)
+...
+Simulation Complete
+Total moves attempted: 400
+Successful matches: 45
+Failed moves: 38
+```
+
+### Simulation Use Cases
+
+Run the simulation to:
+- **Stress test** the concurrent implementation
+- **Verify thread safety** with multiple players
+- **Debug race conditions** in concurrent scenarios
+- **Demonstrate game behavior** under realistic load
+
+## Project Architecture
+
+The codebase follows a strict three-layer architecture:
+
+### Layer 1: Board ADT (`src/board.ts`)
+
+Core game logic with all state mutations. Includes:
+- Representation invariant checks using `assert`
+- Abstraction function documentation
+- Safety from rep exposure arguments
+- Thread safety via async/await coordination
+- Position-specific waiting queues for FIFO fairness
+
+Key features:
+- **Thread-safe**: Uses promises and waiting queues to coordinate concurrent access
+- **Immutable API**: All public methods return new strings, never expose internal state
+- **Pairwise consistency**: The `map()` operation maintains matching pairs
+- **Player colors**: Automatically assigns unique colors to each player
+
+### Layer 2: Commands Module (`src/commands.ts`)
+
+Thin wrapper layer that:
+- Exposes Board methods as simple command functions
+- Parses HTTP request parameters
+- Formats Board responses for HTTP responses
+- Acts as glue code between HTTP and game logic
+
+### Layer 3: HTTP Server (`src/server.ts`)
+
+Routes incoming HTTP requests to command functions:
+- `GET /look/{playerId}` - View board state
+- `PUT /flip/{playerId}/{row}/{column}` - Flip a card
+- `PUT /map/{playerId}` - Apply transformation (with shuffle endpoint)
+- `GET /watch/{playerId}` - Wait for board changes
+
+Provided unchanged from course staff.
+
+## Game Rules
+
+### Card Flipping Rules
+
+**First Card**:
+- Must be face-down and not controlled by any player
+- Becomes face-up and controlled by the player
+- If multiple players try to flip the same card, one succeeds and others wait
+
+**Second Card**:
+- Player must already control exactly one card (their first card)
+- Cannot flip the same card twice
+- After flipping:
+  - **Match**: Both cards stay controlled until player's next turn, then removed
+  - **No match**: Both cards stay face-up until player's next turn, then face-down
+
+### Card States
+
+- **Face-down**: Not visible, shown as "down"
+- **Face-up**: Visible to all players, shown as "up {label}"
+- **Controlled**: Owned by a player, shown as "my {label}" to owner, "up {label}" to others
+- **Removed**: Matched and removed, shown as "none" or "none {color}"
+
+### Concurrency Rules
+
+- Multiple players can flip different first cards simultaneously
+- If a player tries to flip a controlled card, they wait in a FIFO queue
+- If a card is removed while a player is waiting, their flip fails
+- Each player can only control one "first card" at a time
+
+### Map Operation
+
+The `map()` function transforms all card labels while maintaining pairs:
+- If two cards matched before the map, they still match after
+- Applies the transformation function once per unique label
+- All instances of a label are changed to the same new label
+
+
+
+
+Every method in the Board ADT includes:
+- Function signature with TypeScript types
+- `@param` descriptions for all parameters
+- `@returns` documentation for return values
+- `@throws` clauses for error conditions
+- Preconditions and postconditions
+The Board class includes:
+
+**Abstraction Function (AF)**:
+Explains how the internal representation maps to the abstract game state of a Memory Scramble board.
+
+**Representation Invariant (RI)**:
+Documents all constraints that must hold:
+- Dimensions are positive
+- Card arrays match dimensions
+- Removed cards are face-down and not controlled
+- Controlled cards are either first cards or matched cards
+- Each player controls at most one first card
+
+**Safety from Rep Exposure**:
+Explains why clients cannot corrupt internal state:
+- All fields are private and readonly
+- Mutable arrays never returned directly
+- All public methods return strings or Promises
+- Thread safety via async/await coordination
+
+**Thread Safety**:
+Uses promise-based coordination:
+- Position-specific waiting queues ensure FIFO ordering
+- `notifyPositionAvailable()` wakes waiting players
+- `waitForChange()` enables watch notifications
+- No busy-waiting or polling
+
+## Implementation Details
+
+### Key Features
+
+1. **Deferred removal**: Matched cards stay controlled until player's next turn
+2. **Per-player cleanup**: Each player only cleans up their own cards
+3. **FIFO waiting**: Players wait in order for controlled cards
+4. **Player colors**: Each player gets a unique color (10 colors available)
+5. **Match tracking**: Leaderboard shows successful matches per player
+
+### Error Handling
+
+The implementation throws descriptive errors for:
+- Invalid coordinates
+- Flipping removed cards
+- Flipping same card twice
+- Cards controlled by other players
+- Cards removed while waiting
+- Invalid board file format
+
+### Data Structures
+
+- `cards[][]`: 2D array of card labels
+- `faceUp[][]`: 2D array of face-up states
+- `controlledBy`: Map from position to controlling player
+- `firstCard`: Map from player to their first card position
+- `lastTurnCards`: Map from player to their non-matching cards
+- `matchedCards`: Map from player to their matched cards (pending removal)
+- `waitingQueues`: Map from position to queue of waiting players
+- `playerColors`: Map from player to assigned color
+- `removedBy`: Map from position to player who removed the card

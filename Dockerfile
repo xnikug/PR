@@ -1,19 +1,19 @@
-FROM python:3.10-slim
+FROM node:22-alpine
 
 WORKDIR /app
 
-COPY server.py /app/
-COPY client.py /app/
-COPY test_concurrent.py /app/
-COPY test_rate_limit.py /app/
-COPY server.conf /app/
-COPY docker-entrypoint.py /app/
-COPY public/ /app/public/
-COPY client_saves/ /app/client_saves/
-COPY src/ /app/src/
+COPY package*.json ./
+COPY tsconfig.json ./
 
-RUN chmod +x /app/docker-entrypoint.py
+RUN npm ci
+
+COPY src/ ./src/
+COPY test/ ./test/
+COPY board/ ./board/
+COPY public/ ./public/
+
+RUN npm run compile
 
 EXPOSE 8080
 
-CMD ["python3", "/app/docker-entrypoint.py"]
+CMD ["node", "dist/src/server.js", "8080", "board/ab.txt"]

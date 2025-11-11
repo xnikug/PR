@@ -1,13 +1,11 @@
 services:
-  file-server:
+  memory-scramble:
     build: .
     ports:
       - "8080:8080"
     volumes:
-      - ./public:/app/public
-      - ./client_saves:/app/client_saves
-      - ./server.conf:/app/server.conf:ro
-    restart: unless-stopped
-    container_name: http-server
+      - ./board:/app/board:ro
     environment:
-      - PYTHONUNBUFFERED=1
+      - NODE_ENV=production
+    command: ["node", "dist/src/server.js", "8080", "board/zoom.txt"]
+    restart: unless-stopped
