@@ -1,62 +1,34 @@
-# Lab 4: Key-Value Store
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import Dict, Optional
+import asyncio
+import httpx
+import os
+import random
+from contextlib import asynccontextmanager
 
-Key-value service with one leader and five followers.
+ROLE = os.getenv("ROLE", "follower")
+PORT = int(os.getenv("PORT", "8000"))
+WRITE_QUORUM = int(os.getenv("WRITE_QUORUM"))
+MIN_DELAY = int(os.getenv("MIN_DELAY", "0"))
+MAX_DELAY = int(os.getenv("MAX_DELAY", "1000"))
 
-Files and folders: docker-compose.yaml runs services. app holds service code and Dockerfile. tests holds the test runner and tests. test-results holds outputs and plots.
+FOLLOWER_URLS = os.getenv("FOLLOWER_URLS", "").split(",") if os.getenv("FOLLOWER_URLS") else []
 
-Put runtime values in a .env file at the project root.
+store: Dict[str, str] = {}
+store_lock = asyncio.Lock()
 
-Start and run tests:
 
-```bash
-docker compose up --build
-```
+class KeyValue(BaseModel):
+    key: str
+    value: str
 
-Stop the system:
 
-```bash
-docker compose down
-```
+class WriteResponse(BaseModel):
+    success: bool
+    message: str
+    replicated_count: int
 
-API examples (change host/port if needed).
-
-Set a key with curl:
-
-```bash
-curl -s -X PUT http://localhost:8000/key/mykey -H 'Content-Type: application/json' -d '{"value":"42"}'
-```
-
-Get a key with curl:
-
-```bash
-curl -s http://localhost:8000/key/mykey
-```
-
-Methods overview
-
-lifespan(app): Runs at startup and shutdown, prints role and config, yields to run the app, then prints a shutdown message.
-
-replicate_to_follower(follower_url, key, value): Sleeps a short random delay, posts key and value to follower_url/replicate, and returns True on HTTP 200 or False on error.
-
-replicate_to_followers(key, value): Starts async calls to all followers, counts successful replies as they finish, stops when the write quorum is reached, and returns the success count.
-
-write(kv): Leader-only endpoint that saves the key locally, calls replicate_to_followers, and returns if the write quorum was met and how many followers replicated.
-
-replicate(kv): Follower endpoint that saves the replicated key and returns {"status": "ok"}; leaders reject this request.
-
-read(key): Returns the stored value for the key or 404 if not found.
-
-dump(): Returns the full in-memory store and the node role.
-
-health(): Returns a small JSON with status and role to show the service is alive.
-
-wait_for_services(): Test helper that polls the leader and five followers on /health until all are healthy or a timeout occurs.
-
-run_pytest(): Runs pytest for the integration test and returns True if tests passed.
-
-main() in tests/run_all_tests.py: Waits for services to be ready, pauses briefly, runs tests, and prints pass or fail messages.
-
-```python
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -69,6 +41,10 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown
     print(f"Shutting down {ROLE}")
+
+
+app = FastAPI(lifespan=lifespan)
+
 
 async def replicate_to_follower(follower_url: str, key: str, value: str) -> bool:
     try:
@@ -164,7 +140,3 @@ async def dump():
 @app.get("/health")
 async def health():
     return {"status": "healthy", "role": ROLE}
-```
-
-
-Main code: app/main.py. Tests: tests/run_all_tests.py and tests/test_integration.py. Test outputs and plots are in test-results.

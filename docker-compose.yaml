@@ -1,0 +1,145 @@
+services:
+  test-runner:
+    build:
+      context: ./tests
+      dockerfile: Dockerfile.test
+    container_name: kvstore-test-runner
+    depends_on:
+      leader:
+        condition: service_healthy
+      follower1:
+        condition: service_healthy
+      follower2:
+        condition: service_healthy
+      follower3:
+        condition: service_healthy
+      follower4:
+        condition: service_healthy
+      follower5:
+        condition: service_healthy
+    networks:
+      - kvstore-network
+    volumes:
+      - ./test-results:/app/test-results
+
+  leader:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: kvstore-leader
+    env_file:
+      - .env
+    environment:
+      - ROLE=${LEADER_ROLE}
+      - PORT=${LEADER_PORT}
+      - WRITE_QUORUM=${WRITE_QUORUM}
+      - MIN_DELAY=${MIN_DELAY}
+      - MAX_DELAY=${MAX_DELAY}
+      - FOLLOWER_URLS=${FOLLOWER_URLS}
+    networks:
+      - kvstore-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:${LEADER_PORT}/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  follower1:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: kvstore-follower1
+    env_file:
+      - .env
+    environment:
+      - ROLE=${FOLLOWER_ROLE}
+      - PORT=${FOLLOWER_PORT}
+    networks:
+      - kvstore-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:${FOLLOWER_PORT}/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  follower2:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: kvstore-follower2
+    env_file:
+      - .env
+    environment:
+      - ROLE=${FOLLOWER_ROLE}
+      - PORT=${FOLLOWER_PORT}
+    networks:
+      - kvstore-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:${FOLLOWER_PORT}/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  follower3:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: kvstore-follower3
+    env_file:
+      - .env
+    environment:
+      - ROLE=${FOLLOWER_ROLE}
+      - PORT=${FOLLOWER_PORT}
+    networks:
+      - kvstore-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:${FOLLOWER_PORT}/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  follower4:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: kvstore-follower4
+    env_file:
+      - .env
+    environment:
+      - ROLE=${FOLLOWER_ROLE}
+      - PORT=${FOLLOWER_PORT}
+    networks:
+      - kvstore-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:${FOLLOWER_PORT}/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  follower5:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: kvstore-follower5
+    env_file:
+      - .env
+    environment:
+      - ROLE=${FOLLOWER_ROLE}
+      - PORT=${FOLLOWER_PORT}
+    networks:
+      - kvstore-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:${FOLLOWER_PORT}/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+networks:
+  kvstore-network:
+    driver: bridge
